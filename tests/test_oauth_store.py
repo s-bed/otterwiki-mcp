@@ -13,7 +13,7 @@ from mcp.server.auth.provider import (
     TokenError,
 )
 from mcp.shared.auth import OAuthClientInformationFull
-from pydantic import AnyHttpUrl
+from pydantic import AnyHttpUrl, ValidationError
 
 from otterwiki_mcp.consent import derive_signing_key
 from otterwiki_mcp.oauth_store import (
@@ -126,15 +126,13 @@ class TestClientRegistration:
         loaded = await provider.get_client("test-client")
         assert loaded.client_name == "Updated Client"
 
-    @pytest.mark.asyncio
-    async def test_register_requires_client_id(self, tmp_path):
-        provider = _make_provider(tmp_path)
-        client = OAuthClientInformationFull(
-            client_id=None,
-            redirect_uris=[AnyHttpUrl("http://localhost/callback")],
-        )
-        with pytest.raises(ValueError, match="client_id is required"):
-            await provider.register_client(client)
+    def test_client_model_requires_client_id(self):
+        """mcp 2.x enforces RFC 7591 §3.2.1: a client without a client_id can't exist."""
+        with pytest.raises(ValidationError, match="client_id"):
+            OAuthClientInformationFull(
+                client_id=None,
+                redirect_uris=[AnyHttpUrl("http://localhost/callback")],
+            )
 
     @pytest.mark.asyncio
     async def test_persistence_across_instances(self, tmp_path):
