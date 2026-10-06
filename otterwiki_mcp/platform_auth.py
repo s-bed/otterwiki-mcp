@@ -47,9 +47,10 @@ def _host_wiki_slug() -> str:
     """Derive the wiki slug from the current request's Host header.
 
     Mirrors ``_set_host_from_request`` in server.py: the first label of a
-    3+-part hostname is the wiki slug. Returns ``""`` if the header is
-    missing or has no resolvable subdomain (callers treat that as "cannot
-    scope the token to a wiki").
+    3+-part hostname is the wiki slug (lowercased, like the resolver's
+    ``_parse_host``). Returns ``""`` if the header is missing or has no
+    resolvable subdomain; ``verify_token`` rejects the token in that case,
+    since it cannot be scoped to a wiki.
     """
     try:
         request = get_http_request()
@@ -58,7 +59,7 @@ def _host_wiki_slug() -> str:
     host = request.headers.get("host", "")
     if not host:
         return ""
-    hostname = host.split(":")[0]
+    hostname = host.split(":")[0].lower()
     parts = hostname.split(".")
     if len(parts) < 3:
         return ""
@@ -74,6 +75,8 @@ class PlatformTokenVerifier(TokenVerifier):
 
     * SHA-256 the presented token and look up ``wikis.mcp_token_hash``.
     * If no wiki matches → ``None`` (401 to the client).
+    * If the Host has no wiki slug (bare domain, localhost, missing header,
+      no request context) → ``None``: the token cannot be scoped to a wiki.
     * If a wiki matches but its slug != the Host-derived slug → ``None``
       (token belongs to a different wiki; do not leak which one).
     * Otherwise returns an ``AccessToken`` scoped to that wiki slug.
@@ -108,7 +111,12 @@ class PlatformTokenVerifier(TokenVerifier):
 
         slug = row[_SLUG_COLUMN]
         host_slug = _host_wiki_slug()
-        if host_slug and slug != host_slug:
+        if not host_slug:
+            # Fail closed: the resolver denies non-tenant hosts, so a
+            # per-wiki token must not authenticate without a wiki to scope to.
+            logger.info("Bearer token presented on a Host with no wiki slug — rejecting")
+            return None
+        if slug != host_slug:
             logger.info(
                 "Bearer token belongs to wiki %r but Host resolves to %r — rejecting",
                 slug,

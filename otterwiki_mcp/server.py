@@ -62,7 +62,7 @@ def _set_host_from_request() -> None:
     if not host:
         return
     # Strip port if present
-    hostname = host.split(":")[0]
+    hostname = host.split(":")[0].lower()
     # Extract slug: everything before the first dot that isn't the platform domain itself
     # e.g. "dev.mcp.robot.wtf" → slug="dev", or "dev.robot.wtf" → slug="dev"
     parts = hostname.split(".")

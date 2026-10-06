@@ -148,17 +148,32 @@ class TestVerifier:
         assert await verifier.verify_token("other-secret") is None
 
     @pytest.mark.asyncio
-    async def test_no_request_context_accepts_token(self, tmp_path):
-        """Without an HTTP request (e.g. stdio), slug scoping is skipped."""
+    async def test_no_request_context_rejects_token(self, tmp_path):
+        """Without an HTTP request the token can't be scoped to a wiki — fail closed."""
         db = _make_db(tmp_path)
         # Ensure no active request context leaks in
-        try:
-            _current_http_request.set(None)
-        except Exception:
-            pass
+        _current_http_request.set(None)
+        verifier = PlatformTokenVerifier(str(db))
+        assert await verifier.verify_token("cic-secret") is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("host", ["robot.wtf", "localhost:8001", "127.0.0.1:8001", ""])
+    async def test_non_tenant_host_rejects_valid_token(self, tmp_path, host):
+        """A valid token on a Host with no wiki slug must be rejected, not unscoped."""
+        db = _make_db(tmp_path)
+        _with_host(host)
+        verifier = PlatformTokenVerifier(str(db))
+        assert await verifier.verify_token("cic-secret") is None
+
+    @pytest.mark.asyncio
+    async def test_uppercase_host_matches_slug(self, tmp_path):
+        """Host matching is case-insensitive, like the resolver's _parse_host."""
+        db = _make_db(tmp_path)
+        _with_host("CIC.mcp.Robot.WTF")
         verifier = PlatformTokenVerifier(str(db))
         result = await verifier.verify_token("cic-secret")
         assert result is not None
+        assert result.claims["wiki_slug"] == "cic"
 
     @pytest.mark.asyncio
     async def test_missing_db_returns_none(self, tmp_path):
