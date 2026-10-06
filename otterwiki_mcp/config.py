@@ -18,6 +18,11 @@ class Config:
             "SIGNING_KEY_PATH", "/srv/data/signing_key.pem"
         )
         self.platform_domain = os.environ.get("PLATFORM_DOMAIN", "")
+        # Path to the robot.wtf platform SQLite DB (shared across the 8000/
+        # 8002 processes). When set and readable, per-wiki MCP bearer tokens
+        # (wikis.mcp_token_hash) are accepted in addition to the global
+        # MCP_AUTH_TOKEN. Supports ROBOT_DB_PATH as a fallback name.
+        self.platform_db = os.environ.get("MCP_PLATFORM_DB") or os.environ.get("ROBOT_DB_PATH") or ""
 
     def validate(self):
         """Check required vars. Call at server startup, not import time."""

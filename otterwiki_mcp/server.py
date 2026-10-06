@@ -18,6 +18,7 @@ from otterwiki_mcp.api_client import WikiAPIError, WikiClient, current_host_head
 from otterwiki_mcp.config import get_config
 from otterwiki_mcp.consent import derive_signing_key
 from otterwiki_mcp.oauth_store import SQLiteOAuthProvider
+from otterwiki_mcp.platform_auth import PlatformTokenVerifier, platform_db_available
 from fastmcp.server.auth.providers.in_memory import InMemoryOAuthProvider
 from otterwiki_mcp import formatters
 from otterwiki_mcp import sections
@@ -578,6 +579,19 @@ def main():
                 tokens={cfg.mcp_auth_token: {"client_id": "claude-code", "scopes": []}}
             )
         )
+    if cfg.platform_db:
+        if platform_db_available(cfg.platform_db):
+            verifiers.append(PlatformTokenVerifier(cfg.platform_db))
+            logger.info(
+                "Platform per-wiki bearer tokens enabled via %s", cfg.platform_db
+            )
+        else:
+            logger.warning(
+                "MCP_PLATFORM_DB/ROBOT_DB_PATH set to %r but the DB is not "
+                "readable or lacks wikis.mcp_token_hash — per-wiki tokens "
+                "will NOT be accepted; only MCP_AUTH_TOKEN works",
+                cfg.platform_db,
+            )
     mcp.auth = MultiAuth(server=oauth_provider, verifiers=verifiers)
 
     mcp.run(transport="streamable-http", host="0.0.0.0", port=cfg.mcp_port, stateless_http=True)
