@@ -17,9 +17,8 @@ from fastmcp.server.dependencies import get_http_request
 from otterwiki_mcp.api_client import WikiAPIError, WikiClient, current_host_header
 from otterwiki_mcp.config import get_config
 from otterwiki_mcp.consent import derive_signing_key
-from otterwiki_mcp.oauth_store import SQLiteOAuthProvider
+from otterwiki_mcp.oauth_store import SQLiteOAuthProvider, StandaloneSQLiteOAuthProvider
 from otterwiki_mcp.platform_auth import PlatformTokenVerifier, platform_db_available
-from fastmcp.server.auth.providers.in_memory import InMemoryOAuthProvider
 from otterwiki_mcp import formatters
 from otterwiki_mcp import sections
 
@@ -43,7 +42,7 @@ mcp = FastMCP("Otterwiki Research Wiki")
 
 # Initialized in main(); tools reference via module-level variable.
 client: WikiClient
-oauth_provider: SQLiteOAuthProvider | InMemoryOAuthProvider
+oauth_provider: SQLiteOAuthProvider
 platform_domain: str = ""
 
 
@@ -463,7 +462,7 @@ async def authorize_callback(request: Request) -> Response:
     Only available when SQLiteOAuthProvider is configured (i.e. PLATFORM_DOMAIN
     and CONSENT_URL are set). Returns 404 in standalone/development mode.
     """
-    if not isinstance(oauth_provider, SQLiteOAuthProvider):
+    if isinstance(oauth_provider, StandaloneSQLiteOAuthProvider):
         return Response("Not available in standalone mode", status_code=404)
 
     params = request.query_params
@@ -552,26 +551,15 @@ def main():
             client_registration_options=ClientRegistrationOptions(enabled=True),
         )
     elif cfg.platform_domain or cfg.consent_url:
-        missing = "CONSENT_URL" if cfg.platform_domain else "PLATFORM_DOMAIN"
-        logger.warning(
-            "Incomplete platform config: %s is set but %s is missing — "
-            "falling back to InMemoryOAuthProvider",
-            "PLATFORM_DOMAIN" if cfg.platform_domain else "CONSENT_URL",
-            missing,
-        )
-        oauth_provider = InMemoryOAuthProvider(
-            base_url=cfg.mcp_base_url,
-            client_registration_options=ClientRegistrationOptions(enabled=True),
-        )
+        logger.error("PLATFORM_DOMAIN and CONSENT_URL must be configured together")
+        raise SystemExit(1)
     else:
-        logger.info(
-            "PLATFORM_DOMAIN and CONSENT_URL not set — using InMemoryOAuthProvider "
-            "(standalone/development mode)"
-        )
-        oauth_provider = InMemoryOAuthProvider(
+        oauth_provider = StandaloneSQLiteOAuthProvider(
+            cfg.mcp_oauth_db,
             base_url=cfg.mcp_base_url,
             client_registration_options=ClientRegistrationOptions(enabled=True),
         )
+    logger.info("OAuth state persisted to SQLite at %s", cfg.mcp_oauth_db)
     verifiers = []
     if cfg.mcp_auth_token:
         verifiers.append(

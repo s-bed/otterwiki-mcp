@@ -5,9 +5,15 @@ WORKDIR /app
 COPY pyproject.toml .
 COPY otterwiki_mcp/ ./otterwiki_mcp/
 
+RUN chmod -R a+rX /app
+
 RUN pip install --no-cache-dir .
 
-RUN useradd --create-home appuser
+RUN useradd --create-home appuser \
+    && mkdir -p /app/data \
+    && chown appuser:appuser /app/data \
+    && chmod 700 /app/data
+ENV MCP_OAUTH_DB=/app/data/mcp_oauth.db
 USER appuser
 
 EXPOSE 8090

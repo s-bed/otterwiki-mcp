@@ -118,7 +118,7 @@ class SQLiteOAuthProvider(OAuthProvider):
                     f"wiki_slug derived from base_url is invalid: {self._default_wiki_slug!r}. "
                     "Must match [a-z0-9-]+"
                 )
-        else:
+        elif self._consent_url:
             logger.warning(
                 "wiki_slug is empty (base_url=%r has no 3-part hostname); "
                 "OAuth consent redirect will include wiki_slug= (empty). "
@@ -466,10 +466,30 @@ class SQLiteOAuthProvider(OAuthProvider):
                     error_description="redirect_uri does not match any registered URI for this client",
                 )
 
-        # Issue auth code
+        return self._issue_authorization_code(
+            client_id=client_id,
+            redirect_uri=redirect_uri,
+            code_challenge=code_challenge,
+            state=state,
+            scopes=scope.split() if scope else [],
+            resource=resource,
+            redirect_uri_provided_explicitly=True,
+        )
+
+    def _issue_authorization_code(
+        self,
+        *,
+        client_id: str,
+        redirect_uri: str,
+        code_challenge: str,
+        state: str | None,
+        scopes: list[str],
+        resource: str | None,
+        redirect_uri_provided_explicitly: bool,
+    ) -> str:
+        """Persist the code before returning the client redirect."""
         code_value = f"authcode_{secrets.token_hex(20)}"
         expires_at = time.time() + AUTH_CODE_EXPIRY_SECONDS
-        scopes_list = scope.split() if scope else []
 
         conn = self._connect()
         try:
@@ -482,9 +502,9 @@ class SQLiteOAuthProvider(OAuthProvider):
                     code_value,
                     client_id,
                     redirect_uri,
-                    1,
+                    int(redirect_uri_provided_explicitly),
                     code_challenge,
-                    json.dumps(scopes_list),
+                    json.dumps(scopes),
                     expires_at,
                     resource,
                 ),
@@ -668,9 +688,16 @@ class SQLiteOAuthProvider(OAuthProvider):
         if client.client_id is None:
             raise TokenError("invalid_client", "Client ID is required")
 
-        # Revoke old pair
+        # Preserve the resource binding while rotating the token pair.
         conn = self._connect()
         try:
+            row = conn.execute(
+                "SELECT resource FROM oauth_tokens WHERE token = ? AND client_id = ? AND token_type = 'refresh'",
+                (refresh_token.token, client.client_id),
+            ).fetchone()
+            if row is None:
+                raise TokenError("invalid_grant", "Refresh token not found or already used.")
+            resource = row["resource"]
             self._revoke_pair(conn, refresh_token=refresh_token.token)
             conn.commit()
         finally:
@@ -695,7 +722,7 @@ class SQLiteOAuthProvider(OAuthProvider):
                     access_expires,
                     "access",
                     new_refresh,
-                    None,
+                    resource,
                 ),
             )
             conn.execute(
@@ -709,7 +736,7 @@ class SQLiteOAuthProvider(OAuthProvider):
                     refresh_expires,
                     "refresh",
                     new_access,
-                    None,
+                    resource,
                 ),
             )
             conn.commit()
@@ -759,3 +786,39 @@ class SQLiteOAuthProvider(OAuthProvider):
 
         for tok in tokens_to_delete:
             conn.execute("DELETE FROM oauth_tokens WHERE token = ?", (tok,))
+
+
+class StandaloneSQLiteOAuthProvider(SQLiteOAuthProvider):
+    """Persist the standalone flow previously served by InMemoryOAuthProvider.
+
+    Authorization is automatic, matching the existing standalone behavior.
+    Platform deployments must use SQLiteOAuthProvider's signed consent flow.
+    """
+
+    async def authorize(
+        self, client: OAuthClientInformationFull, params: AuthorizationParams
+    ) -> str:
+        registered = await self.get_client(client.client_id)
+        if registered is None:
+            raise AuthorizeError(
+                error="unauthorized_client",
+                error_description=f"Client '{client.client_id}' not registered.",
+            )
+        if str(params.redirect_uri) not in [str(uri) for uri in registered.redirect_uris or []]:
+            raise AuthorizeError(
+                error="invalid_request", error_description="Invalid redirect URI"
+            )
+
+        scopes = params.scopes or []
+        if registered.scope:
+            allowed = set(registered.scope.split())
+            scopes = [scope for scope in scopes if scope in allowed]
+        return self._issue_authorization_code(
+            client_id=registered.client_id,
+            redirect_uri=str(params.redirect_uri),
+            code_challenge=params.code_challenge,
+            state=params.state,
+            scopes=scopes,
+            resource=params.resource,
+            redirect_uri_provided_explicitly=params.redirect_uri_provided_explicitly,
+        )

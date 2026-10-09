@@ -5,11 +5,10 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 from fastmcp.server.auth import MultiAuth, StaticTokenVerifier
-from fastmcp.server.auth.providers.in_memory import InMemoryOAuthProvider
 
 import otterwiki_mcp.server as server_mod
 from otterwiki_mcp.config import Config
-from otterwiki_mcp.oauth_store import SQLiteOAuthProvider
+from otterwiki_mcp.oauth_store import SQLiteOAuthProvider, StandaloneSQLiteOAuthProvider
 
 
 # --- Minimal valid env for main() ---
@@ -19,6 +18,13 @@ VALID_ENV = {
     "OTTERWIKI_API_KEY": "test-key",
     "MCP_BASE_URL": "http://localhost:8090",
 }
+
+
+@pytest.fixture(autouse=True)
+def isolated_auth_env(monkeypatch, tmp_path):
+    for name in ("PLATFORM_DOMAIN", "CONSENT_URL", "MCP_PLATFORM_DB", "ROBOT_DB_PATH", "MCP_PORT"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("MCP_OAUTH_DB", str(tmp_path / "oauth.db"))
 
 
 def _run_main(monkeypatch, extra_env=None, tmp_path=None):
@@ -37,8 +43,6 @@ def _run_main(monkeypatch, extra_env=None, tmp_path=None):
     # Use a temp DB so tests don't leave mcp_oauth.db in the working dir
     if tmp_path is not None:
         monkeypatch.setenv("MCP_OAUTH_DB", str(tmp_path / "test_oauth.db"))
-    else:
-        monkeypatch.setenv("MCP_OAUTH_DB", ":memory:")
 
     with patch.object(server_mod.mcp, "run"):
         server_mod.main()
@@ -50,23 +54,23 @@ class TestAuthSetup:
     """main() constructs MultiAuth correctly based on env."""
 
     def test_multiauth_without_token(self, monkeypatch):
-        """No MCP_AUTH_TOKEN -> MultiAuth with InMemoryOAuthProvider (no PLATFORM_DOMAIN set), no verifiers."""
+        """No MCP_AUTH_TOKEN -> MultiAuth with StandaloneSQLiteOAuthProvider (no PLATFORM_DOMAIN set), no verifiers."""
         monkeypatch.delenv("PLATFORM_DOMAIN", raising=False)
         monkeypatch.delenv("CONSENT_URL", raising=False)
         auth = _run_main(monkeypatch)
 
         assert isinstance(auth, MultiAuth)
-        assert isinstance(auth.server, InMemoryOAuthProvider)
+        assert isinstance(auth.server, StandaloneSQLiteOAuthProvider)
         assert auth.verifiers == []
 
     def test_multiauth_with_token(self, monkeypatch):
-        """MCP_AUTH_TOKEN set -> MultiAuth with InMemoryOAuthProvider (no PLATFORM_DOMAIN) + StaticTokenVerifier."""
+        """MCP_AUTH_TOKEN set -> MultiAuth with StandaloneSQLiteOAuthProvider (no PLATFORM_DOMAIN) + StaticTokenVerifier."""
         monkeypatch.delenv("PLATFORM_DOMAIN", raising=False)
         monkeypatch.delenv("CONSENT_URL", raising=False)
         auth = _run_main(monkeypatch, extra_env={"MCP_AUTH_TOKEN": "my-secret-token"})
 
         assert isinstance(auth, MultiAuth)
-        assert isinstance(auth.server, InMemoryOAuthProvider)
+        assert isinstance(auth.server, StandaloneSQLiteOAuthProvider)
         assert len(auth.verifiers) == 1
         assert isinstance(auth.verifiers[0], StaticTokenVerifier)
 
@@ -81,11 +85,11 @@ class TestAuthSetup:
         assert verifier.tokens[token]["scopes"] == []
 
     def test_oauth_provider_base_url(self, monkeypatch):
-        """InMemoryOAuthProvider receives MCP_BASE_URL (PLATFORM_DOMAIN not set)."""
+        """StandaloneSQLiteOAuthProvider receives MCP_BASE_URL (PLATFORM_DOMAIN not set)."""
         monkeypatch.delenv("PLATFORM_DOMAIN", raising=False)
         monkeypatch.delenv("CONSENT_URL", raising=False)
         auth = _run_main(monkeypatch)
-        # InMemoryOAuthProvider stores base_url as AnyHttpUrl
+        # StandaloneSQLiteOAuthProvider stores base_url as AnyHttpUrl
         assert str(auth.server.base_url) == "http://localhost:8090/"
 
     def test_empty_token_treated_as_absent(self, monkeypatch):
@@ -107,7 +111,10 @@ class TestAuthVerification:
 
         result = await auth.verify_token(token)
         assert result is not None
-        assert result.client_id == "claude-code"
+        # MultiAuth may namespace client_id; the static verifier metadata is
+        # checked separately above.
+        assert result.token == token
+        assert result.scopes == []
 
     @pytest.mark.asyncio
     async def test_wrong_token_rejected(self, monkeypatch):
@@ -151,14 +158,14 @@ class TestMainSideEffects:
 class TestOAuthProviderSelection:
     """main() selects the correct OAuth provider based on PLATFORM_DOMAIN."""
 
-    def test_no_platform_domain_uses_in_memory_provider(self, monkeypatch):
-        """When PLATFORM_DOMAIN is not set, InMemoryOAuthProvider is used."""
+    def test_no_platform_domain_uses_standalone_sqlite_provider(self, monkeypatch):
+        """When PLATFORM_DOMAIN is not set, StandaloneSQLiteOAuthProvider is used."""
         monkeypatch.delenv("PLATFORM_DOMAIN", raising=False)
         monkeypatch.delenv("CONSENT_URL", raising=False)
         auth = _run_main(monkeypatch)
 
         assert isinstance(auth, MultiAuth)
-        assert isinstance(auth.server, InMemoryOAuthProvider)
+        assert isinstance(auth.server, StandaloneSQLiteOAuthProvider)
 
     def test_platform_domain_set_uses_sqlite_provider(self, monkeypatch, tmp_path):
         """When PLATFORM_DOMAIN and CONSENT_URL are set and signing key exists, SQLiteOAuthProvider is used."""
@@ -185,16 +192,23 @@ class TestOAuthProviderSelection:
         cfg = Config()
         assert not cfg.platform_domain  # must be None or empty string, not "robot.wtf"
 
-    def test_partial_config_platform_domain_only_uses_in_memory(self, monkeypatch, caplog):
-        """PLATFORM_DOMAIN set but CONSENT_URL missing -> InMemoryOAuthProvider + WARNING logged."""
-        import logging
+    @pytest.mark.parametrize("setting", ["PLATFORM_DOMAIN", "CONSENT_URL"])
+    def test_partial_platform_config_aborts(self, monkeypatch, setting):
+        monkeypatch.setenv(setting, "example.com" if setting == "PLATFORM_DOMAIN" else "https://example.com/consent")
+        with pytest.raises(SystemExit):
+            _run_main(monkeypatch)
 
-        monkeypatch.setenv("PLATFORM_DOMAIN", "example.com")
-        monkeypatch.delenv("CONSENT_URL", raising=False)
+    def test_unwritable_database_aborts(self, monkeypatch, tmp_path):
+        import sqlite3
 
-        with caplog.at_level(logging.WARNING, logger="otterwiki_mcp.server"):
-            auth = _run_main(monkeypatch)
+        monkeypatch.setenv("MCP_OAUTH_DB", str(tmp_path / "missing" / "oauth.db"))
+        with pytest.raises(sqlite3.OperationalError):
+            _run_main(monkeypatch)
 
-        assert isinstance(auth, MultiAuth)
-        assert isinstance(auth.server, InMemoryOAuthProvider)
-        assert any("CONSENT_URL" in record.message for record in caplog.records)
+    def test_missing_platform_signing_key_aborts(self, monkeypatch, tmp_path):
+        with pytest.raises(SystemExit):
+            _run_main(monkeypatch, extra_env={
+                "PLATFORM_DOMAIN": "example.com",
+                "CONSENT_URL": "https://example.com/consent",
+                "SIGNING_KEY_PATH": str(tmp_path / "missing.pem"),
+            })

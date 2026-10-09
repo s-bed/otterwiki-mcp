@@ -41,15 +41,16 @@ All via environment variables:
 | `MCP_BASE_URL` | yes | | Externally-reachable URL of this MCP server (e.g. `https://mcp.example.com`). Used for OAuth discovery endpoints. |
 | `MCP_AUTH_TOKEN` | no | | Optional bearer token for Claude Code access. If set, clients can authenticate with `Authorization: Bearer <token>` in addition to OAuth. |
 | `MCP_PORT` | no | `8090` | Port the MCP server listens on |
-| `PLATFORM_DOMAIN` | no | | Domain of the multi-tenant platform (e.g. `robot.wtf`). When set together with `CONSENT_URL`, enables `SQLiteOAuthProvider` with a persistent OAuth store and custom consent flow. When unset, the server falls back to `InMemoryOAuthProvider` (suitable for standalone/development use). |
-| `CONSENT_URL` | no | | Full URL of the OAuth consent page used when `PLATFORM_DOMAIN` is set (e.g. `https://robot.wtf/auth/oauth/consent`). Has no effect when `PLATFORM_DOMAIN` is unset. |
+| `MCP_OAUTH_DB` | no | `mcp_oauth.db` (`/app/data/mcp_oauth.db` in Docker) | SQLite database for OAuth clients, codes, and tokens. The supplied Compose files persist `/app/data` in the `mcp-data` named volume. |
+| `PLATFORM_DOMAIN` | no | | Domain of the multi-tenant platform (e.g. `robot.wtf`). Must be set together with `CONSENT_URL` to enable the external signed consent flow. |
+| `CONSENT_URL` | no | | Full URL of the OAuth consent page used when `PLATFORM_DOMAIN` is set (e.g. `https://robot.wtf/auth/oauth/consent`). Must be set together with `PLATFORM_DOMAIN`. |
 | `SIGNING_KEY_PATH` | no | `/srv/data/signing_key.pem` | Path to the PEM signing key used to verify approval tokens in the consent flow. Only required when `PLATFORM_DOMAIN` and `CONSENT_URL` are set. |
 
 ## Authentication
 
 The server supports two authentication methods:
 
-- **OAuth 2.1** (primary) — Used by Claude.ai. The server acts as its own OAuth authorization server, handling Dynamic Client Registration, PKCE, and token management. When both `PLATFORM_DOMAIN` and `CONSENT_URL` are set, `SQLiteOAuthProvider` is used: OAuth state is persisted to SQLite and a custom consent page handles user approval. When either variable is absent, the server falls back to `InMemoryOAuthProvider`: OAuth state is in-memory and a server restart requires re-authentication.
+- **OAuth 2.1** (primary) — Used by Claude.ai. The server acts as its own OAuth authorization server, handling Dynamic Client Registration, PKCE, and token management. OAuth state is always persisted to SQLite. Standalone deployments retain the existing automatic authorization flow. When both `PLATFORM_DOMAIN` and `CONSENT_URL` are set, a custom consent page handles user approval using the shared signing key. Incomplete platform settings abort startup. Registrations, pending authorization codes, access tokens, and refresh tokens survive restarts and container recreation when the database volume is retained.
 - **Bearer token** (optional) — Used by Claude Code. Enabled when `MCP_AUTH_TOKEN` is set. Clients send `Authorization: Bearer <token>` in HTTP headers.
 
 ### Connecting from Claude.ai
@@ -81,9 +82,17 @@ Add to your MCP server configuration with the bearer token in headers:
 
 Terminate TLS in front of the MCP server (nginx, Caddy, etc.) so tokens aren't sent in cleartext.
 
+After updating an existing Compose deployment, rebuild and recreate the MCP service:
+
+```sh
+docker compose up -d --build mcp-server
+```
+
+Existing in-memory registrations and tokens cannot be recovered; reconnect the client once after this upgrade. Subsequent restarts retain OAuth state. Do not delete the `mcp-data` volume (for example with `docker compose down -v`) if you want to retain connections. Custom database locations must be in a writable persistent directory; startup fails if the database cannot be opened.
+
 ## Dependencies
 
-- [FastMCP](https://github.com/jlowin/fastmcp) >= 2.0
+- [FastMCP](https://github.com/jlowin/fastmcp) >= 4.0
 - [httpx](https://www.python-httpx.org/) >= 0.27
 
 Requires the [otterwiki-api](https://github.com/schuyler/otterwiki-api) plugin installed in the Otterwiki instance. The [otterwiki-semantic-search](https://github.com/schuyler/otterwiki-semantic-search) plugin is needed for the `semantic_search` tool.

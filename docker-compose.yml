@@ -32,15 +32,19 @@ services:
     restart: unless-stopped
     ports:
       - "8090:8090"
+    volumes:
+      - mcp-data:/app/data
     environment:
       OTTERWIKI_API_URL: "http://otterwiki:80"
       OTTERWIKI_API_KEY: "${OTTERWIKI_API_KEY}"
       MCP_BASE_URL: "${MCP_BASE_URL}"
       MCP_AUTH_TOKEN: "${MCP_AUTH_TOKEN:-}"
       MCP_PORT: "8090"
+      MCP_OAUTH_DB: "/app/data/mcp_oauth.db"
     depends_on:
       - otterwiki
 
 volumes:
   wiki-data:
   chroma-data:
+  mcp-data:
